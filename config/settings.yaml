@@ -92,7 +92,7 @@ glossary:
   # Model for phrase_provider: gemini. An alias rather than a pinned version:
   # Google retires specific names, and a dead model would silently stop
   # translation on a machine nobody administers.
-  gemini_model: "gemini-flash-latest"
+  gemini_model: "gemini-flash-lite-latest"
 
   # What happens when a report uses a phrase the glossary does not cover:
   #   hold - NO draft is created. The alarm waits, and the next run builds the
