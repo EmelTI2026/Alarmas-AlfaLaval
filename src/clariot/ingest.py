@@ -570,7 +570,7 @@ class Ingestor:
                 self.store.forget_draft(event.equipment_key)
                 return None
 
-        state = self.outlook.draft_state(entry_id)
+        state = self.outlook.draft_state(entry_id, expected_cc=self._expected_cc(event))
         if state == self.outlook.DRAFT_CLEAN:
             return entry_id
 
@@ -585,6 +585,31 @@ class Ingestor:
         )
         self.store.forget_draft(event.equipment_key)
         return None
+
+    def _expected_cc(self, event) -> tuple[str, ...]:
+        """Every address the program itself could have copied on this machine.
+
+        The union, not the exact list: the severity is decided further down, after
+        the draft has already been chosen for reuse, so the critical copies are
+        counted in even when this alarm turns out to be routine. Being permissive
+        here can at most miss a manual CC edit; being strict would make our own
+        copies look like one and break the "one growing draft per equipment" rule.
+        """
+        addresses: list[str] = []
+        route = self.directory.resolve(getattr(event, "company", ""))
+        if route is not None:
+            addresses.extend(route.cc)
+        addresses.extend(self.directory.always_cc)
+        addresses.extend(self.directory.critical_cc)
+
+        seen: set[str] = set()
+        unique: list[str] = []
+        for address in addresses:
+            key = address.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(address)
+        return tuple(unique)
 
     # ------------------------------------------------------------- housekeeping
 

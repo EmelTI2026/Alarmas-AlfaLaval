@@ -74,6 +74,25 @@ class MailSummary:
     """Path of the folder the message was found in, e.g. "1_Auditoria_Clariot/Nestle"."""
 
 
+def _recipient_count(value: str) -> int:
+    """How many entries an Outlook recipient string holds.
+
+    Outlook writes ``;`` between entries, so that is the separator. A comma only
+    splits a piece that already holds two addresses, which is how a line typed by
+    hand can look before Outlook normalises it. Splitting on every comma would be
+    wrong: a copy resolved against the address book reads back as
+    ``"Orellana, Pablo"``, and counting that as two recipients is exactly the
+    miscount this function exists to avoid.
+    """
+    entries = 0
+    for part in value.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        entries += max(part.count("@"), 1)
+    return entries
+
+
 _BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 
 
@@ -405,11 +424,15 @@ class OutlookClient:
     DRAFT_TOUCHED = "touched"
     DRAFT_CLEAN = "clean"
 
-    def draft_state(self, entry_id: str) -> str:
+    def draft_state(self, entry_id: str, *, expected_cc: Sequence[str] = ()) -> str:
         """Whether a draft can safely be regenerated.
 
         Regenerating destroys whatever the technician typed, so a draft he has
         started working on is left alone and the new alarm gets its own draft.
+
+        ``expected_cc`` is the copy list the program itself would have written for
+        this draft. Only a *longer* CC than that means a human added a recipient;
+        the copies we put there ourselves are not evidence of anything.
         """
         try:
             item = self._namespace.GetItemFromID(entry_id)
@@ -419,7 +442,15 @@ class OutlookClient:
         try:
             if bool(getattr(item, "Sent", False)):
                 return self.DRAFT_SENT
-            if str(item.To or "").strip() or str(item.CC or "").strip():
+            if str(item.To or "").strip():
+                return self.DRAFT_TOUCHED
+            # Counted, never matched by address. After Save(), Outlook resolves a
+            # copy against the address book and reads the entry back as a display
+            # name ("Orellana, Pablo") instead of the SMTP address we wrote, so
+            # comparing strings would see our own copy list as a human edit and
+            # every draft would stop being reusable — which is the bug this check
+            # replaces. The number of entries survives that rewriting.
+            if _recipient_count(str(item.CC or "")) > len(expected_cc):
                 return self.DRAFT_TOUCHED
             if self.UNTOUCHED_MARKER not in str(item.HTMLBody or ""):
                 return self.DRAFT_TOUCHED

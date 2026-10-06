@@ -48,6 +48,7 @@ class FakeOutlook:
         self.drafts = []
         self.updates = []
         self.finished = []
+        self.state_queries = []
 
     def messages(self, folder, include_subfolders=True):
         return list(self._messages)
@@ -64,7 +65,8 @@ class FakeOutlook:
         self.drafts.append(kwargs)
         return f"DRAFT-{len(self.drafts)}"
 
-    def draft_state(self, entry_id):
+    def draft_state(self, entry_id, *, expected_cc=()):
+        self.state_queries.append((entry_id, tuple(expected_cc)))
         return self._state
 
     def update_draft(self, entry_id, **kwargs):
@@ -450,6 +452,34 @@ def test_the_console_counts_the_draft_as_it_stands_not_as_it_started(build):
     assert report.single_drafts == 0
     assert "1 urgentes" in report.summary()
     assert "normales" not in report.summary()
+
+
+def test_the_reuse_check_is_told_which_copies_are_ours(build):
+    """Without the copy list, our own CC reads back as a technician's edit.
+
+    The union is passed on purpose: the severity is only decided after the draft
+    has been picked for reuse, so the critical copies count too.
+    """
+    from clariot.config import ClientDirectory
+
+    build(
+        FakeOutlook([message("<cc-1@aliot>")]),
+        alert={**ALERT, "event_date": "22-07-2026 08:00"},
+    ).run()
+
+    outlook = FakeOutlook([message("<cc-2@aliot>")])
+    ingestor = build(outlook, alert={**ALERT, "event_date": "23-07-2026 09:00"})
+    ingestor.directory = ClientDirectory(
+        routes=[],
+        critical_cc=("jefatura@emeltec.cl",),
+        always_cc=("archivo@emeltec.cl",),
+    )
+    ingestor.run()
+
+    assert outlook.state_queries, "the open draft was never checked"
+    entry_id, expected_cc = outlook.state_queries[-1]
+    assert entry_id == "DRAFT-1"
+    assert set(expected_cc) == {"archivo@emeltec.cl", "jefatura@emeltec.cl"}
 
 
 def test_two_different_reports_with_the_same_filename_never_overwrite(build, settings):

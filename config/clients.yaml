@@ -19,4 +19,8 @@ clients: []
 critical_cc: []
 
 # Copied on every draft, regardless of client. Useful for an internal archive mailbox.
-always_cc: []
+always_cc:
+  - "porellana@emeltec.cl"
+  - "cfarias@emeltec.cl"
+  - "mlizana@emeltec.cl"
+  - "hlagos@emeltec.cl"
