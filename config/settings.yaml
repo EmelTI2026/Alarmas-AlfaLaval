@@ -75,6 +75,10 @@ email:
   # SMTP address of the account to send from. Empty means the default account.
   sender_account: ""
   signature_team: "Equipo Emeltec Chile"
+  # Add the sending account's default Outlook signature below the body, with its
+  # logo and images untouched, so the technician no longer inserts it by hand.
+  # Does nothing, silently, when the account has no signature configured.
+  use_outlook_signature: true
 
 glossary:
   # Who translates a phrase the glossary does not cover:

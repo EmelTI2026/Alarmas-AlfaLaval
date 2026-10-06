@@ -94,6 +94,7 @@ def settings(tmp_path):
             include_report=True,
             sender_account="",
             signature_team="Equipo Emeltec Chile",
+            use_outlook_signature=True,
         ),
         critical_urgencies=frozenset({"CRITICAL", "CRITICA", "ALTA"}),
         deepl_api_key="test-key",

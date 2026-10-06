@@ -12,6 +12,7 @@ Deployment constraints worth knowing before touching this file:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -73,6 +74,35 @@ class MailSummary:
     """Path of the folder the message was found in, e.g. "1_Auditoria_Clariot/Nestle"."""
 
 
+_BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+
+
+def _merge_signature(html_body: str, signature: str) -> str:
+    """Place our report inside the signature document, above the signature.
+
+    Outlook hands the default signature back as a *complete* HTML document,
+    styles and inline images included. Writing our body and the signature one
+    after the other would give the draft two ``<html>`` roots, and Outlook
+    renders that unpredictably. So the report is spliced in right after the
+    signature's opening ``<body>`` tag instead: one well-formed document, the
+    report first, the signature underneath it.
+
+    An empty signature leaves the body byte-identical, which is what keeps the
+    "no signature configured" case indistinguishable from the old behaviour.
+    """
+    if not signature.strip():
+        return html_body
+
+    match = _BODY_OPEN_TAG.search(signature)
+    if match is None:
+        # A fragment rather than a document. Concatenating is then correct, and
+        # the ordering the technician expects still holds.
+        return html_body + signature
+
+    cut = match.end()
+    return signature[:cut] + html_body + signature[cut:]
+
+
 def _safe_property(item, prop: str) -> str:
     try:
         return str(item.PropertyAccessor.GetProperty(prop) or "")
@@ -87,12 +117,16 @@ class OutlookClient:
     fake implementing the same handful of methods.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, use_signature: bool = True) -> None:
         try:
             import pythoncom
             import win32com.client
         except ImportError as exc:  # pragma: no cover - Windows-only dependency
             raise OutlookError("pywin32 is required to talk to Outlook") from exc
+
+        self._use_signature = use_signature
+        # Read at most once per run, and only if a draft is actually written.
+        self._signature_cache: str | None = None
 
         # Required when running from a thread or a scheduled task host.
         pythoncom.CoInitialize()
@@ -274,6 +308,49 @@ class OutlookClient:
 
         return saved
 
+    # --------------------------------------------------------------- signature
+
+    def _default_signature(self) -> str:
+        """The account's default "new message" signature, as an HTML document.
+
+        Classic Outlook only injects a signature when an Inspector is created
+        for the item, which is why a throwaway ``MailItem`` is built and its
+        ``GetInspector`` merely touched: that access is what makes Outlook drop
+        the signature into ``HTMLBody``, where it can be read back. The item is
+        never saved nor displayed, so nothing reaches the mailbox and it dies
+        with this scope.
+
+        Reading the signature from Outlook rather than hardcoding one in the
+        template is deliberate: it keeps the logo and the inline images exactly
+        as the account has them.
+
+        An account with no signature configured is an ordinary situation, not a
+        failure, and neither is an Outlook build that refuses the Inspector. Any
+        such case answers with an empty string and the draft is written exactly
+        as it was before this existed.
+        """
+        if self._signature_cache is not None:
+            return self._signature_cache
+
+        signature = ""
+        try:
+            probe = self._app.CreateItem(OL_MAIL_ITEM)
+            probe.GetInspector  # noqa: B018 - the access itself is the effect
+            signature = str(probe.HTMLBody or "")
+        except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
+            logger.info("Could not read the default Outlook signature: %s", exc)
+
+        if not signature.strip():
+            logger.debug("No default Outlook signature to add to the draft")
+        self._signature_cache = signature
+        return signature
+
+    def _signature(self) -> str:
+        """The signature to merge, or "" when the setting switches it off."""
+        if not self._use_signature:
+            return ""
+        return self._default_signature()
+
     # ----------------------------------------------------------------- writing
 
     def create_draft(
@@ -291,18 +368,21 @@ class OutlookClient:
         """Create a draft and save it. Never sends. Returns the draft EntryID."""
         mail = self._app.CreateItem(OL_MAIL_ITEM)
         mail.Subject = subject
-        mail.HTMLBody = html_body
         if to:
             mail.To = "; ".join(to)
         if cc:
             mail.CC = "; ".join(cc)
 
+        # Before the signature is read, on purpose: which signature Outlook
+        # offers depends on the account the message is being sent from.
         if sender_account:
             account = self._account_by_smtp(sender_account)
             if account is not None:
                 mail.SendUsingAccount = account
             else:
                 logger.warning("Account '%s' not found; using the default one", sender_account)
+
+        mail.HTMLBody = _merge_signature(html_body, self._signature())
 
         for path in attachments:
             if path.exists():
@@ -365,7 +445,9 @@ class OutlookClient:
         """
         item = self._item(entry_id)
         item.Subject = subject
-        item.HTMLBody = html_body
+        # Merged again, not carried over: the body is rewritten wholesale, so a
+        # draft growing a second alarm would otherwise lose its signature.
+        item.HTMLBody = _merge_signature(html_body, self._signature())
         if cc:
             item.CC = "; ".join(cc)
 

@@ -112,6 +112,7 @@ class EmailSettings:
     include_report: bool
     sender_account: str
     signature_team: str
+    use_outlook_signature: bool
 
 
 @dataclass(frozen=True)
@@ -260,6 +261,7 @@ def load_settings(project_root: Path, config_dir: Path | None = None) -> Setting
             include_report=bool(email.get("include_report", True)),
             sender_account=str(email.get("sender_account", "")).strip(),
             signature_team=str(email.get("signature_team", "")).strip(),
+            use_outlook_signature=bool(email.get("use_outlook_signature", True)),
         ),
         critical_urgencies=frozenset(
             normalize(str(item)) for item in urgency.get("critical_values", [])
