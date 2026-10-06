@@ -5,16 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-CANONICAL_FIELDS = (
-    "company",
-    "machine",
-    "sensor_id",
-    "event_type",
-    "urgency",
-    "event_date",
-    "location",
-)
-
 
 @dataclass(frozen=True)
 class AlertReport:
@@ -55,15 +45,3 @@ class ClientRoute:
     display_name: str
     to: tuple[str, ...]
     cc: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class DraftContent:
-    """Everything needed to build the Outlook draft, with no Outlook involved."""
-
-    subject: str
-    html_body: str
-    to: tuple[str, ...]
-    cc: tuple[str, ...]
-    is_critical: bool
-    client_resolved: bool

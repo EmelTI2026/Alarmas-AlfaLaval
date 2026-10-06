@@ -7,11 +7,26 @@ from clariot.adapters import build_translator
 
 # The translation providers are optional: the current design attaches the
 # original PDF and needs neither package. See requirements-optional.txt.
+
+
+def _module_available(name: str) -> bool:
+    """Report whether `name` can be imported, without ever raising.
+
+    find_spec() only returns None for a missing leaf whose parent package
+    exists; for a dotted name whose parent is absent it raises
+    ModuleNotFoundError, which would abort collection of this whole module.
+    """
+    try:
+        return find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 needs_deepl = pytest.mark.skipif(
-    find_spec("deepl") is None, reason="optional 'deepl' package not installed"
+    not _module_available("deepl"), reason="optional 'deepl' package not installed"
 )
 needs_google = pytest.mark.skipif(
-    find_spec("google.cloud.translate") is None,
+    not _module_available("google.cloud.translate"),
     reason="optional 'google-cloud-translate' package not installed",
 )
 

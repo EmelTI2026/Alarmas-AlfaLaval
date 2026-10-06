@@ -13,7 +13,6 @@ from clariot.models import ClientRoute
 from clariot.report_builder import build_equipment_draft, build_weekly_draft
 from clariot.store import (
     REPORT_CRITICAL,
-    REPORT_SINGLE,
     REPORT_URGENT,
     REPORT_WEEKLY,
     StoredEvent,

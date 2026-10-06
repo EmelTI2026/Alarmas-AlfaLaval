@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from jinja2 import Environment
@@ -23,7 +23,7 @@ from .ledger import STATUS_DONE, Ledger
 from .pdf_parser import parse_pdf
 from .report_builder import build_equipment_draft
 from .store import EventStore, build_event, serial_from_subject
-from .textutils import normalize, sanitize_filename
+from .textutils import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
