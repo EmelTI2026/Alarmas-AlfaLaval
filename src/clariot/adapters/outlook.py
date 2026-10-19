@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -30,6 +31,8 @@ OL_CLASS_MAIL = 43
 PROP_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
 # PR_ATTACH_CONTENT_ID_W: present on inline images such as signature logos.
 PROP_ATTACH_CONTENT_ID = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
+# PR_ATTACHMENT_HIDDEN: keeps an inline image out of the attachment list.
+PROP_ATTACH_HIDDEN = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B"
 
 
 class OutlookError(RuntimeError):
@@ -136,6 +139,10 @@ class OutlookClient:
     fake implementing the same handful of methods.
     """
 
+    # Class-level default so an instance built without __init__ (as the tests do,
+    # since __init__ dispatches COM) still has no images to attach.
+    _signature_images: tuple[tuple[Path, str], ...] = ()
+
     def __init__(self, *, use_signature: bool = True) -> None:
         try:
             import pythoncom
@@ -146,6 +153,8 @@ class OutlookClient:
         self._use_signature = use_signature
         # Read at most once per run, and only if a draft is actually written.
         self._signature_cache: str | None = None
+        # The signature's hidden images, as (saved file, Content-ID) pairs.
+        self._signature_images: tuple[tuple[Path, str], ...] = ()
 
         # Required when running from a thread or a scheduled task host.
         pythoncom.CoInitialize()
@@ -340,8 +349,14 @@ class OutlookClient:
         with this scope.
 
         Reading the signature from Outlook rather than hardcoding one in the
-        template is deliberate: it keeps the logo and the inline images exactly
-        as the account has them.
+        template is deliberate: it keeps the logo exactly as the account has it.
+
+        The HTML alone is not the signature. A logo is referenced as ``cid:...``
+        and travels as a hidden attachment of the item it was inserted into, so
+        copying only the HTML into another draft leaves a broken image, which in
+        a signature that is just a picture means no signature at all. The
+        referenced images are therefore saved here too, and ``_attach_signature_images``
+        puts them on every draft that carries the signature.
 
         An account with no signature configured is an ordinary situation, not a
         failure, and neither is an Outlook build that refuses the Inspector. Any
@@ -352,17 +367,60 @@ class OutlookClient:
             return self._signature_cache
 
         signature = ""
+        images: list[tuple[Path, str]] = []
         try:
             probe = self._app.CreateItem(OL_MAIL_ITEM)
             probe.GetInspector  # noqa: B018 - the access itself is the effect
             signature = str(probe.HTMLBody or "")
+            images = self._save_signature_images(probe, signature)
         except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
             logger.info("Could not read the default Outlook signature: %s", exc)
 
         if not signature.strip():
             logger.debug("No default Outlook signature to add to the draft")
         self._signature_cache = signature
+        self._signature_images = tuple(images)
         return signature
+
+    @staticmethod
+    def _save_signature_images(probe, signature: str) -> list[tuple[Path, str]]:
+        """Save the inline images the signature references, with their Content-ID.
+
+        Only attachments the HTML actually points at are kept. The folder is a
+        fixed one under the system temp directory, so a run overwrites the files
+        of the previous one instead of piling up new ones.
+        """
+        folder = Path(tempfile.gettempdir()) / "clariot-signature"
+        folder.mkdir(parents=True, exist_ok=True)
+
+        images: list[tuple[Path, str]] = []
+        for index in range(1, int(probe.Attachments.Count) + 1):
+            attachment = probe.Attachments.Item(index)
+            try:
+                cid = str(attachment.PropertyAccessor.GetProperty(PROP_ATTACH_CONTENT_ID) or "")
+            except Exception:  # noqa: BLE001 - not an inline image
+                continue
+            if not cid or f"cid:{cid}" not in signature:
+                continue
+            path = folder / sanitize_filename(str(attachment.FileName), fallback=f"firma-{index}")
+            attachment.SaveAsFile(str(path))
+            images.append((path, cid))
+        return images
+
+    def _attach_signature_images(self, mail) -> None:
+        """Give a draft the hidden images its signature points at.
+
+        Each is attached under the Content-ID the signature HTML already uses, so
+        the ``cid:`` reference resolves. A failure only costs the picture, never
+        the draft.
+        """
+        for path, cid in self._signature_images:
+            try:
+                attachment = mail.Attachments.Add(str(path))
+                attachment.PropertyAccessor.SetProperty(PROP_ATTACH_CONTENT_ID, cid)
+                attachment.PropertyAccessor.SetProperty(PROP_ATTACH_HIDDEN, True)
+            except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
+                logger.warning("Could not attach the signature image %s: %s", path.name, exc)
 
     def _signature(self) -> str:
         """The signature to merge, or "" when the setting switches it off."""
@@ -402,6 +460,7 @@ class OutlookClient:
                 logger.warning("Account '%s' not found; using the default one", sender_account)
 
         mail.HTMLBody = _merge_signature(html_body, self._signature())
+        self._attach_signature_images(mail)
 
         for path in attachments:
             if path.exists():
@@ -494,6 +553,8 @@ class OutlookClient:
 
         for index in range(item.Attachments.Count, 0, -1):
             item.Attachments.Item(index).Delete()
+        # The loop above also removed the signature's hidden images.
+        self._attach_signature_images(item)
         for path in attachments:
             if path.exists():
                 item.Attachments.Add(str(path.resolve()))

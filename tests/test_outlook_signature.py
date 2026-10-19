@@ -7,9 +7,15 @@ does: touching ``GetInspector`` on a mail item drops the account's default
 signature into its ``HTMLBody``.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
-from clariot.adapters.outlook import OutlookClient, _merge_signature
+from clariot.adapters.outlook import (
+    PROP_ATTACH_CONTENT_ID,
+    PROP_ATTACH_HIDDEN,
+    OutlookClient,
+    _merge_signature,
+)
 
 # Shaped like what the templates render: a fragment, not a whole document.
 REPORT = f'<div style="font-family: Calibri;"><p>Estimado {OutlookClient.UNTOUCHED_MARKER}</p></div>'
@@ -24,21 +30,56 @@ SIGNATURE = (
 )
 
 
+class FakeAttachment:
+    """An attachment that knows its Content-ID the way a real inline image does."""
+
+    def __init__(self, owner, *, path: str = "", file_name: str = "", cid: str = "") -> None:
+        self.path = path
+        self.FileName = file_name or Path(path).name
+        self.props: dict[str, object] = {PROP_ATTACH_CONTENT_ID: cid} if cid else {}
+        self._owner = owner
+        self.PropertyAccessor = SimpleNamespace(GetProperty=self._get, SetProperty=self._set)
+
+    def _get(self, name: str):
+        # Real Outlook raises for a property the attachment does not have.
+        if name not in self.props:
+            raise KeyError(name)
+        return self.props[name]
+
+    def _set(self, name: str, value) -> None:
+        self.props[name] = value
+
+    def SaveAsFile(self, path: str) -> None:
+        Path(path).write_bytes(b"IMAGE")
+
+    def Delete(self) -> None:
+        self._owner.items.remove(self)
+
+
 class FakeAttachments:
     """Just enough of the Attachments collection for the writing paths."""
 
-    def __init__(self) -> None:
-        self.paths: list[str] = []
+    def __init__(self, add_error: str = "") -> None:
+        self.items: list[FakeAttachment] = []
+        self._add_error = add_error
+
+    @property
+    def paths(self) -> list[str]:
+        return [item.path for item in self.items]
 
     @property
     def Count(self) -> int:
-        return len(self.paths)
+        return len(self.items)
 
-    def Add(self, path: str) -> None:
-        self.paths.append(path)
+    def Add(self, path: str) -> FakeAttachment:
+        if self._add_error:
+            raise RuntimeError(self._add_error)
+        attachment = FakeAttachment(self, path=path)
+        self.items.append(attachment)
+        return attachment
 
-    def Item(self, index: int):
-        return SimpleNamespace(Delete=lambda: self.paths.pop(index - 1))
+    def Item(self, index: int) -> FakeAttachment:
+        return self.items[index - 1]
 
 
 class FakeMail:
@@ -46,9 +87,17 @@ class FakeMail:
 
     EntryID = "DRAFT-1"
 
-    def __init__(self, log: list[str], signature: str, inspector_error: str) -> None:
+    def __init__(
+        self,
+        log: list[str],
+        signature: str,
+        inspector_error: str,
+        images: dict[str, str] | None = None,
+        add_error: str = "",
+    ) -> None:
         self._signature = signature
         self._inspector_error = inspector_error
+        self._images = images or {}
         self._log = log
         self._account = None
         self.Subject = ""
@@ -56,16 +105,24 @@ class FakeMail:
         self.To = ""
         self.CC = ""
         self.Sent = False
-        self.Attachments = FakeAttachments()
+        self.Attachments = FakeAttachments(add_error)
         self.saves = 0
 
     @property
     def GetInspector(self):
-        """Reading this is what makes Outlook insert the signature."""
+        """Reading this is what makes Outlook insert the signature.
+
+        A signature's logo arrives as a hidden attachment of this same item,
+        referenced from the HTML by its Content-ID.
+        """
         self._log.append("inspector")
         if self._inspector_error:
             raise RuntimeError(self._inspector_error)
         self.HTMLBody = self._signature
+        for cid, file_name in self._images.items():
+            self.Attachments.items.append(
+                FakeAttachment(self.Attachments, file_name=file_name, cid=cid)
+            )
         return object()
 
     @property
@@ -100,6 +157,8 @@ def client(
     inspector_error: str = "",
     account_smtp: str = "",
     existing_draft: FakeMail | None = None,
+    images: dict[str, str] | None = None,
+    add_error: str = "",
 ):
     """An OutlookClient wired to a fake Outlook, plus its item log.
 
@@ -112,7 +171,7 @@ def client(
 
     def create_item(_kind: int) -> FakeMail:
         log.append("create")
-        mail = FakeMail(log, signature, inspector_error)
+        mail = FakeMail(log, signature, inspector_error, images, add_error)
         created.append(mail)
         return mail
 
@@ -264,3 +323,107 @@ def test_the_body_tag_is_found_whatever_its_case_or_attributes():
     merged = _merge_signature("<p>informe</p>", '<HTML><BODY LANG="ES">firma</BODY></HTML>')
 
     assert merged == '<HTML><BODY LANG="ES"><p>informe</p>firma</BODY></HTML>'
+
+
+# The signature as a real classic Outlook returned it: no text at all, a single
+# picture referenced by Content-ID, and the picture itself a hidden attachment.
+REAL_CID = "image001.jpg@01DD5FC8.9FF38EE0"
+IMAGE_ONLY_SIGNATURE = (
+    "<html><head><style>p.MsoNormal {margin: 0;}</style></head>"
+    "<body lang=ES-CL><div class=WordSection1><p class=MsoNormal><o:p>&nbsp;</o:p></p>"
+    '<p class=MsoNormal><a name="_MailAutoSig"><span>'
+    f'<img width=615 height=133 id="Imagen_x0020_1" src="cid:{REAL_CID}">'
+    "</span></a></p></div></body></html>"
+)
+
+
+def test_a_picture_only_signature_is_placed_below_the_report():
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE, images={REAL_CID: "image001.jpg"}
+    )
+
+    body = draft_body(adapter, created)
+
+    assert body.index(OutlookClient.UNTOUCHED_MARKER) < body.index(f"cid:{REAL_CID}")
+
+
+def test_the_signature_image_travels_with_the_draft():
+    """The regression: the HTML pointed at an image the draft did not carry.
+
+    A logo is referenced as ``cid:`` and lives on the item Outlook signed, so
+    copying the HTML alone left a broken picture, which for a signature that is
+    only a picture means no visible signature at all.
+    """
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE, images={REAL_CID: "image001.jpg"}
+    )
+
+    draft_body(adapter, created)
+
+    (image,) = created[0].Attachments.items
+    assert image.props[PROP_ATTACH_CONTENT_ID] == REAL_CID
+    assert image.props[PROP_ATTACH_HIDDEN] is True
+    assert Path(image.path).read_bytes() == b"IMAGE"
+
+
+def test_an_attachment_the_signature_does_not_reference_is_not_copied():
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE, images={"otra.png@01": "otra.png"}
+    )
+
+    draft_body(adapter, created)
+
+    assert created[0].Attachments.items == []
+
+
+def test_a_signature_without_images_attaches_nothing():
+    adapter, created, _ = client()
+
+    draft_body(adapter, created)
+
+    assert created[0].Attachments.items == []
+
+
+def test_growing_a_draft_keeps_the_signature_image():
+    """``update_draft`` clears every attachment, the hidden image included."""
+    existing = FakeMail([], IMAGE_ONLY_SIGNATURE, "")
+    existing.Parent = SimpleNamespace(Name="Por enviar")
+    existing.Attachments.Add("C:/old/previous-alarm.pdf")
+    adapter, _, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE,
+        images={REAL_CID: "image001.jpg"},
+        existing_draft=existing,
+    )
+
+    adapter.update_draft("DRAFT-1", subject="dos alarmas", html_body=REPORT)
+
+    (image,) = existing.Attachments.items
+    assert image.props[PROP_ATTACH_CONTENT_ID] == REAL_CID
+    assert f"cid:{REAL_CID}" in existing.HTMLBody
+
+
+def test_the_signature_image_is_read_once_per_run():
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE, images={REAL_CID: "image001.jpg"}
+    )
+
+    draft_body(adapter, created)
+    adapter.create_draft(subject="otra", html_body=REPORT, to=(), cc=(), attachments=())
+
+    drafts = [mail for mail in created if mail.saves]
+    assert len(drafts) == 2
+    assert all(len(mail.Attachments.items) == 1 for mail in drafts)
+
+
+def test_a_signature_image_that_cannot_be_attached_does_not_block_the_draft():
+    """A missing picture is a flaw; a missing draft is the failure."""
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE,
+        images={REAL_CID: "image001.jpg"},
+        add_error="Outlook refused the attachment",
+    )
+
+    body = draft_body(adapter, created)
+
+    assert created[0].saves == 1
+    assert OutlookClient.UNTOUCHED_MARKER in body
