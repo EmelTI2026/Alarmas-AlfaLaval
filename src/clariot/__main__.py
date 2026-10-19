@@ -429,7 +429,10 @@ def main(argv: list[str] | None = None) -> int:
     from .adapters.outlook import OutlookClient
 
     try:
-        outlook = OutlookClient(use_signature=settings.email.use_outlook_signature)
+        outlook = OutlookClient(
+            use_signature=settings.email.use_outlook_signature,
+            signature_account=settings.email.sender_account,
+        )
         doc_translator = build_translator(settings)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("clariot").error("No se pudo iniciar: %s", exc)

@@ -11,14 +11,13 @@ Deployment constraints worth knowing before touching this file:
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import unquote
 
 from ..textutils import sanitize_filename
 
@@ -127,11 +126,11 @@ def _merge_signature(html_body: str, signature: str) -> str:
     return signature[:cut] + html_body + signature[cut:]
 
 
-_CID_REFERENCE = re.compile(r"""cid:([^"'\s>)]+)""", re.IGNORECASE)
-
-# A picture stored inside the signature file itself, as a base64 data URI.
-_DATA_URI_IMAGE = re.compile(
-    rb"""<img\b[^>]*?\bsrc=["']data:image/(?P<kind>[A-Za-z0-9.+-]+);base64,(?P<data>[^"']+)["']""",
+# A picture the signature file points at by a relative path, such as the
+# "<name>_archivos/image001.png" folder classic signatures keep beside the .htm.
+# A data URI, a cid:, a web address or a file: link is left alone.
+_RELATIVE_IMAGE = re.compile(
+    r"""(?P<head><img\b[^>]*?\bsrc=["'])(?P<src>(?!data:|cid:|https?:|file:)[^"']+)(?P<tail>["'])""",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -140,7 +139,7 @@ def _default_signature_name() -> str:
     """Name Outlook keeps for the default new-message signature, or "".
 
     Read from the registry because the signature files themselves do not say
-    which one is the default.
+    which one is the default. Plenty of accounts have none.
     """
     try:
         import winreg
@@ -160,12 +159,13 @@ def _default_signature_name() -> str:
     return ""
 
 
-def _pick_signature_file(folder: Path, preferred: str) -> Path | None:
-    """The signature file to read pictures from, or None when it is ambiguous.
+def _pick_signature_file(folder: Path, preferred: str, account: str = "") -> Path | None:
+    """The signature file to use, or None when there is none or it is ambiguous.
 
-    The default signature wins when its name is known. Without it, a lone file is
-    unambiguous; several files and no way to tell them apart means guessing, and
-    a guess could sign a report with somebody else's signature.
+    In order: the default signature, when its name is known; the one named after
+    the sending account, when exactly one is; a lone file. Several files and no
+    way to tell them apart means guessing, and a guess could sign a report with
+    somebody else's signature.
     """
     if not folder.is_dir():
         return None
@@ -173,27 +173,62 @@ def _pick_signature_file(folder: Path, preferred: str) -> Path | None:
     for file in files:
         if preferred and file.stem.lower() == preferred.lower():
             return file
+    if account:
+        named = [file for file in files if account.lower() in file.stem.lower()]
+        if len(named) == 1:
+            return named[0]
     return files[0] if len(files) == 1 else None
 
 
-def _embedded_signature_images(folder: Path, preferred: str) -> list[tuple[bytes, str]]:
-    """Pictures stored as data URIs inside the signature file, in document order.
+def _read_signature_html(path: Path) -> str:
+    """The signature file as text, in the encoding it declares.
 
-    Outlook cannot hand these over as attachments (saving them fails with "the
-    data source is missing"), but the bytes are right there in the file.
+    Outlook writes these files in a Windows code page; a declared charset wins,
+    then UTF-8, then Windows-1252.
     """
-    file = _pick_signature_file(folder, preferred)
-    if file is None:
-        return []
-    images: list[tuple[bytes, str]] = []
-    for match in _DATA_URI_IMAGE.finditer(file.read_bytes()):
+    raw = path.read_bytes()
+    found = re.search(rb"""charset=["']?([A-Za-z0-9_-]+)""", raw[:4096], re.IGNORECASE)
+    encodings = [found.group(1).decode("ascii")] if found else []
+    for encoding in (*encodings, "utf-8", "cp1252"):
         try:
-            data = base64.b64decode(re.sub(rb"\s+", b"", match.group("data")))
-        except ValueError:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
             continue
-        kind = match.group("kind").decode("ascii").lower().replace("jpeg", "jpg")
-        images.append((data, kind))
-    return images
+    return raw.decode("cp1252", errors="replace")
+
+
+def _load_signature(
+    folder: Path, preferred: str, account: str = ""
+) -> tuple[str, tuple[tuple[Path, str], ...]]:
+    """The signature's HTML and the pictures it needs attached, if any.
+
+    A picture stored inside the file as a data URI stays exactly where it is:
+    Outlook renders it in the draft as it does when a person starts a message by
+    hand. A picture referenced by a relative path would show up broken in a
+    draft, so it is rewritten to a ``cid:`` reference and returned for attaching.
+    """
+    file = _pick_signature_file(folder, preferred, account)
+    if file is None:
+        if len(list(folder.glob("*.htm"))) > 1:
+            logger.warning(
+                "Several signatures and none is the default: the draft is created "
+                "without one. Set a default signature in Outlook."
+            )
+        return "", ()
+
+    html = _read_signature_html(file)
+    images: list[tuple[Path, str]] = []
+    root = folder.resolve()
+
+    def to_cid(match: re.Match) -> str:
+        path = (file.parent / unquote(match.group("src"))).resolve()
+        if not path.is_file() or not path.is_relative_to(root):
+            return match.group(0)
+        cid = f"clariot-firma-{len(images) + 1}"
+        images.append((path, cid))
+        return f"{match.group('head')}cid:{cid}{match.group('tail')}"
+
+    return _RELATIVE_IMAGE.sub(to_cid, html), tuple(images)
 
 
 def _safe_property(item, prop: str) -> str:
@@ -216,8 +251,10 @@ class OutlookClient:
     # Where Outlook keeps signature files. None means the current user's folder;
     # the tests point it at a temporary directory.
     _signatures_dir: Path | None = None
+    # Which account's signature to prefer when there are several files.
+    _signature_account: str = ""
 
-    def __init__(self, *, use_signature: bool = True) -> None:
+    def __init__(self, *, use_signature: bool = True, signature_account: str = "") -> None:
         try:
             import pythoncom
             import win32com.client
@@ -225,6 +262,7 @@ class OutlookClient:
             raise OutlookError("pywin32 is required to talk to Outlook") from exc
 
         self._use_signature = use_signature
+        self._signature_account = signature_account.strip()
         # Read at most once per run, and only if a draft is actually written.
         self._signature_cache: str | None = None
         # The signature's hidden images, as (saved file, Content-ID) pairs.
@@ -413,122 +451,45 @@ class OutlookClient:
     # --------------------------------------------------------------- signature
 
     def _default_signature(self) -> str:
-        """The account's default "new message" signature, as an HTML document.
+        """The signature to put on a draft, read from Outlook's own signature files.
 
-        Classic Outlook only injects a signature when an Inspector is created
-        for the item, which is why a throwaway ``MailItem`` is built and its
-        ``GetInspector`` merely touched: that access is what makes Outlook drop
-        the signature into ``HTMLBody``, where it can be read back. The item is
-        never saved nor displayed, so nothing reaches the mailbox and it dies
-        with this scope.
+        Classic Outlook keeps every signature as an .htm file in the user's
+        profile, so it is read from there rather than from a message Outlook has
+        signed. That does not depend on a default signature being configured: the
+        default wins when there is one, a lone signature is used when there is
+        not, and an ambiguous set is left out rather than guessed.
 
-        Reading the signature from Outlook rather than hardcoding one in the
-        template is deliberate: it keeps the logo exactly as the account has it.
-
-        The HTML alone is not the signature. A logo is referenced as ``cid:...``
-        and travels as a hidden attachment of the item it was inserted into, so
-        copying only the HTML into another draft leaves a broken image, which in
-        a signature that is just a picture means no signature at all. The
-        referenced images are therefore saved here too, and ``_attach_signature_images``
-        puts them on every draft that carries the signature.
-
-        An account with no signature configured is an ordinary situation, not a
-        failure, and neither is an Outlook build that refuses the Inspector. Any
-        such case answers with an empty string and the draft is written exactly
-        as it was before this existed.
+        Read once per run. No signature at all is an ordinary situation, not a
+        failure: the draft is then written exactly as it was before this existed.
         """
         if self._signature_cache is not None:
             return self._signature_cache
 
-        signature = ""
-        probe = None
+        folder = self._signatures_dir or (
+            Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Signatures"
+        )
+        signature, images = "", ()
         try:
-            probe = self._app.CreateItem(OL_MAIL_ITEM)
-            probe.GetInspector  # noqa: B018 - the access itself is the effect
-            signature = str(probe.HTMLBody or "")
-        except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
-            logger.info("Could not read the default Outlook signature: %s", exc)
+            signature, images = _load_signature(
+                folder, _default_signature_name(), self._signature_account
+            )
+        except Exception as exc:  # noqa: BLE001 - a signature must never block a draft
+            logger.warning("Could not read the signature file: %s", exc)
 
-        images: list[tuple[Path, str]] = []
-        if signature.strip() and probe is not None:
-            # Apart from the read above, so a picture that cannot be collected is
-            # reported as that and never as a signature that could not be read.
-            try:
-                images = self._save_signature_images(probe, signature)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Could not collect the signature's pictures: %s", exc)
-        else:
-            logger.debug("No default Outlook signature to add to the draft")
-
+        if not signature.strip():
+            logger.info("No signature found to add to the drafts")
         self._signature_cache = signature
-        self._signature_images = tuple(images)
+        self._signature_images = images
         return signature
 
-    def _save_signature_images(self, probe, signature: str) -> list[tuple[Path, str]]:
-        """Save the pictures the signature references, with their Content-ID.
-
-        The Content-IDs come from the HTML itself, since that is what a draft has
-        to be able to resolve. The bytes come from Outlook's own attachments when
-        it can hand them over, and from the picture embedded in the signature file
-        when it cannot: some signatures keep their logo as a data URI, and Outlook
-        refuses to save those ("the data source is missing").
-
-        The folder is a fixed one under the system temp directory, so a run
-        overwrites the files of the previous one instead of piling up new ones.
-        """
-        cids = list(dict.fromkeys(_CID_REFERENCE.findall(signature)))
-        if not cids:
-            return []
-
-        folder = Path(tempfile.gettempdir()) / "clariot-signature"
-        folder.mkdir(parents=True, exist_ok=True)
-
-        saved: dict[str, Path] = {}
-        try:
-            count = int(probe.Attachments.Count)
-        except Exception:  # noqa: BLE001
-            count = 0
-        for index in range(1, count + 1):
-            try:
-                attachment = probe.Attachments.Item(index)
-                cid = str(attachment.PropertyAccessor.GetProperty(PROP_ATTACH_CONTENT_ID) or "")
-                if cid not in cids:
-                    continue
-                path = folder / sanitize_filename(
-                    str(attachment.FileName), fallback=f"firma-{index}"
-                )
-                attachment.SaveAsFile(str(path))
-            except Exception as exc:  # noqa: BLE001 - not inline, or unsaveable
-                logger.debug("Outlook would not hand over a signature picture: %s", exc)
-                continue
-            saved[cid] = path
-
-        missing = [cid for cid in cids if cid not in saved]
-        if missing:
-            signatures = self._signatures_dir or (
-                Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Signatures"
-            )
-            embedded = _embedded_signature_images(signatures, _default_signature_name())
-            if not embedded:
-                logger.info(
-                    "The signature has %s picture(s) that could not be recovered",
-                    len(missing),
-                )
-            # Matched by order of appearance: the k-th picture the HTML references
-            # is the k-th one stored in the file.
-            for number, (cid, (data, kind)) in enumerate(zip(missing, embedded), start=1):
-                path = folder / f"firma-{number}.{kind}"
-                path.write_bytes(data)
-                saved[cid] = path
-
-        return [(path, cid) for cid, path in saved.items()]
-
     def _attach_signature_images(self, mail) -> None:
-        """Give a draft the hidden images its signature points at.
+        """Give a draft the pictures its signature references by ``cid:``.
 
-        Each is attached under the Content-ID the signature HTML already uses, so
-        the ``cid:`` reference resolves. A failure only costs the picture, never
-        the draft.
+        Only signatures whose pictures live in files beside the .htm have any;
+        a picture embedded in the file needs nothing. Each is attached hidden,
+        under the Content-ID the HTML now uses, and before the body is written:
+        Outlook links a ``cid:`` reference to an attachment that already exists.
+        A failure only costs the picture, never the draft.
         """
         for path, cid in self._signature_images:
             try:
