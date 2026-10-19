@@ -76,6 +76,59 @@ def test_a_recipient_in_the_to_field_still_means_a_human_edited_it():
     assert adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC) == adapter.DRAFT_TOUCHED
 
 
+# What clients.yaml pre-loads for a client with two contacts, and how Outlook
+# reads them back after Save().
+CLIENT_TO = ("rletelier@koandina.com", "mvalenzuelal@koandina.com")
+RESOLVED_TO = "Letelier, Rodrigo; Valenzuela, Marcelo"
+
+
+def test_recipients_we_preloaded_are_not_evidence_that_a_human_edited_the_draft():
+    """The same regression as the copies, for the To field.
+
+    Once clients.yaml fills ``to``, every draft we create has a recipient. Without
+    the expected list that would read as the technician's edit and stop the
+    one-growing-draft-per-equipment rule.
+    """
+    adapter = client(To=RESOLVED_TO, CC=RESOLVED_CC)
+
+    state = adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC, expected_to=CLIENT_TO)
+
+    assert state == adapter.DRAFT_CLEAN
+
+
+def test_the_same_preloaded_recipients_as_addresses_also_count_as_ours():
+    adapter = client(To="; ".join(CLIENT_TO), CC=RESOLVED_CC)
+
+    state = adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC, expected_to=CLIENT_TO)
+
+    assert state == adapter.DRAFT_CLEAN
+
+
+def test_an_extra_recipient_means_a_human_edited_the_draft():
+    adapter = client(To=f"{RESOLVED_TO}; otro@cliente.example", CC=RESOLVED_CC)
+
+    state = adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC, expected_to=CLIENT_TO)
+
+    assert state == adapter.DRAFT_TOUCHED
+
+
+def test_a_recipient_on_a_client_with_nothing_preloaded_is_a_human_edit():
+    """An unknown company gets an empty To, so anything there was typed."""
+    adapter = client(To="operaciones@cliente.example", CC=RESOLVED_CC)
+
+    state = adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC, expected_to=())
+
+    assert state == adapter.DRAFT_TOUCHED
+
+
+def test_a_preloaded_draft_that_was_sent_is_still_never_rewritten():
+    adapter = client(Sent=True, To=RESOLVED_TO, CC=RESOLVED_CC)
+
+    state = adapter.draft_state("ENTRY-1", expected_cc=ALWAYS_CC, expected_to=CLIENT_TO)
+
+    assert state == adapter.DRAFT_SENT
+
+
 def test_a_body_without_the_placeholder_means_a_human_edited_it():
     adapter = client(CC=RESOLVED_CC, HTMLBody="<html><p>Estimado Pablo</p></html>")
 

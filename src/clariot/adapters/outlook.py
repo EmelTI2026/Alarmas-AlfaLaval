@@ -424,7 +424,13 @@ class OutlookClient:
     DRAFT_TOUCHED = "touched"
     DRAFT_CLEAN = "clean"
 
-    def draft_state(self, entry_id: str, *, expected_cc: Sequence[str] = ()) -> str:
+    def draft_state(
+        self,
+        entry_id: str,
+        *,
+        expected_cc: Sequence[str] = (),
+        expected_to: Sequence[str] = (),
+    ) -> str:
         """Whether a draft can safely be regenerated.
 
         Regenerating destroys whatever the technician typed, so a draft he has
@@ -433,6 +439,10 @@ class OutlookClient:
         ``expected_cc`` is the copy list the program itself would have written for
         this draft. Only a *longer* CC than that means a human added a recipient;
         the copies we put there ourselves are not evidence of anything.
+
+        ``expected_to`` is the same idea for the recipients: the addresses the
+        client directory pre-loads. With nothing pre-loaded, any recipient at all
+        was typed by a person.
         """
         try:
             item = self._namespace.GetItemFromID(entry_id)
@@ -442,14 +452,14 @@ class OutlookClient:
         try:
             if bool(getattr(item, "Sent", False)):
                 return self.DRAFT_SENT
-            if str(item.To or "").strip():
-                return self.DRAFT_TOUCHED
             # Counted, never matched by address. After Save(), Outlook resolves a
-            # copy against the address book and reads the entry back as a display
-            # name ("Orellana, Pablo") instead of the SMTP address we wrote, so
-            # comparing strings would see our own copy list as a human edit and
+            # recipient against the address book and reads the entry back as a
+            # display name ("Orellana, Pablo") instead of the SMTP address we wrote,
+            # so comparing strings would see our own recipients as a human edit and
             # every draft would stop being reusable — which is the bug this check
             # replaces. The number of entries survives that rewriting.
+            if _recipient_count(str(item.To or "")) > len(expected_to):
+                return self.DRAFT_TOUCHED
             if _recipient_count(str(item.CC or "")) > len(expected_cc):
                 return self.DRAFT_TOUCHED
             if self.UNTOUCHED_MARKER not in str(item.HTMLBody or ""):

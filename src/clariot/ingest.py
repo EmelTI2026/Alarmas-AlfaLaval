@@ -570,7 +570,12 @@ class Ingestor:
                 self.store.forget_draft(event.equipment_key)
                 return None
 
-        state = self.outlook.draft_state(entry_id, expected_cc=self._expected_cc(event))
+        route = self.directory.resolve(getattr(event, "company", ""))
+        state = self.outlook.draft_state(
+            entry_id,
+            expected_cc=self._expected_cc(event),
+            expected_to=route.to if route is not None else (),
+        )
         if state == self.outlook.DRAFT_CLEAN:
             return entry_id
 

@@ -49,6 +49,7 @@ class FakeOutlook:
         self.updates = []
         self.finished = []
         self.state_queries = []
+        self.to_queries = []
 
     def messages(self, folder, include_subfolders=True):
         return list(self._messages)
@@ -65,8 +66,9 @@ class FakeOutlook:
         self.drafts.append(kwargs)
         return f"DRAFT-{len(self.drafts)}"
 
-    def draft_state(self, entry_id, *, expected_cc=()):
+    def draft_state(self, entry_id, *, expected_cc=(), expected_to=()):
         self.state_queries.append((entry_id, tuple(expected_cc)))
+        self.to_queries.append((entry_id, tuple(expected_to)))
         return self._state
 
     def update_draft(self, entry_id, **kwargs):
@@ -480,6 +482,40 @@ def test_the_reuse_check_is_told_which_copies_are_ours(build):
     entry_id, expected_cc = outlook.state_queries[-1]
     assert entry_id == "DRAFT-1"
     assert set(expected_cc) == {"archivo@emeltec.cl", "jefatura@emeltec.cl"}
+
+
+def test_the_reuse_check_is_told_which_recipients_are_ours(build):
+    """A pre-loaded To must not read as the technician's edit.
+
+    Mirrors the copy-list test: clients.yaml fills ``to`` for a known company, so
+    the reuse check has to be told how many recipients are ours.
+    """
+    from clariot.config import ClientDirectory
+    from clariot.models import ClientRoute
+    from clariot.textutils import normalize
+
+    route = ClientRoute(
+        display_name="Soprole",
+        to=("uno@soprole.example", "dos@soprole.example"),
+        cc=(),
+    )
+    directory = ClientDirectory(routes=[((normalize("soprole"),), route)])
+
+    first = build(
+        FakeOutlook([message("<to-1@aliot>")]),
+        alert={**ALERT, "event_date": "22-07-2026 08:00"},
+    )
+    first.directory = directory
+    first.run()
+
+    outlook = FakeOutlook([message("<to-2@aliot>")])
+    second = build(outlook, alert={**ALERT, "event_date": "23-07-2026 09:00"})
+    second.directory = directory
+    second.run()
+
+    assert outlook.to_queries, "the open draft was never checked"
+    _, expected_to = outlook.to_queries[-1]
+    assert expected_to == ("uno@soprole.example", "dos@soprole.example")
 
 
 def test_two_different_reports_with_the_same_filename_never_overwrite(build, settings):
