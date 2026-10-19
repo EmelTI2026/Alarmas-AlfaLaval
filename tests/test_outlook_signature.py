@@ -7,9 +7,13 @@ does: touching ``GetInspector`` on a mail item drops the account's default
 signature into its ``HTMLBody``.
 """
 
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+import clariot.adapters.outlook as outlook_module
 from clariot.adapters.outlook import (
     PROP_ATTACH_CONTENT_ID,
     PROP_ATTACH_HIDDEN,
@@ -30,11 +34,20 @@ SIGNATURE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_registry_default(monkeypatch):
+    """The default signature name comes from the registry; tests set their own."""
+    monkeypatch.setattr(outlook_module, "_default_signature_name", lambda: "")
+
+
 class FakeAttachment:
     """An attachment that knows its Content-ID the way a real inline image does."""
 
-    def __init__(self, owner, *, path: str = "", file_name: str = "", cid: str = "") -> None:
+    def __init__(
+        self, owner, *, path: str = "", file_name: str = "", cid: str = "", save_error: str = ""
+    ) -> None:
         self.path = path
+        self._save_error = save_error
         self.FileName = file_name or Path(path).name
         self.props: dict[str, object] = {PROP_ATTACH_CONTENT_ID: cid} if cid else {}
         self._owner = owner
@@ -50,6 +63,8 @@ class FakeAttachment:
         self.props[name] = value
 
     def SaveAsFile(self, path: str) -> None:
+        if self._save_error:
+            raise RuntimeError(self._save_error)
         Path(path).write_bytes(b"IMAGE")
 
     def Delete(self) -> None:
@@ -94,7 +109,9 @@ class FakeMail:
         inspector_error: str,
         images: dict[str, str] | None = None,
         add_error: str = "",
+        save_error: str = "",
     ) -> None:
+        self._save_error = save_error
         self._signature = signature
         self._inspector_error = inspector_error
         self._images = images or {}
@@ -121,7 +138,9 @@ class FakeMail:
         self.HTMLBody = self._signature
         for cid, file_name in self._images.items():
             self.Attachments.items.append(
-                FakeAttachment(self.Attachments, file_name=file_name, cid=cid)
+                FakeAttachment(
+                    self.Attachments, file_name=file_name, cid=cid, save_error=self._save_error
+                )
             )
         return object()
 
@@ -159,6 +178,8 @@ def client(
     existing_draft: FakeMail | None = None,
     images: dict[str, str] | None = None,
     add_error: str = "",
+    save_error: str = "",
+    signatures_dir: Path | None = None,
 ):
     """An OutlookClient wired to a fake Outlook, plus its item log.
 
@@ -171,7 +192,7 @@ def client(
 
     def create_item(_kind: int) -> FakeMail:
         log.append("create")
-        mail = FakeMail(log, signature, inspector_error, images, add_error)
+        mail = FakeMail(log, signature, inspector_error, images, add_error, save_error)
         created.append(mail)
         return mail
 
@@ -183,6 +204,8 @@ def client(
     )
     adapter._use_signature = use_signature
     adapter._signature_cache = None
+    # Never the real folder of whoever runs the tests.
+    adapter._signatures_dir = signatures_dir or Path("no-signatures-here")
     return adapter, created, log
 
 
@@ -427,3 +450,115 @@ def test_a_signature_image_that_cannot_be_attached_does_not_block_the_draft():
 
     assert created[0].saves == 1
     assert OutlookClient.UNTOUCHED_MARKER in body
+
+
+# --- a picture Outlook cannot hand over ------------------------------------
+
+PICTURE = b"PICTURE-BYTES"
+
+
+def signature_file(folder: Path, name: str, payload: bytes = PICTURE, kind: str = "jpeg") -> Path:
+    """A signature file the way a data-URI signature is stored: no _archivos folder."""
+    path = folder / f"{name}.htm"
+    path.write_bytes(
+        b'<html><body><p><img width=615 src="data:image/'
+        + kind.encode()
+        + b";base64,"
+        + base64.b64encode(payload)
+        + b'"></p></body></html>'
+    )
+    return path
+
+
+def test_a_picture_outlook_cannot_save_is_read_from_the_signature_file(tmp_path):
+    """The case on the technician's PC.
+
+    The signature's logo is a data URI inside the .htm. Outlook lists it as an
+    attachment of the throwaway item but refuses to save it ("the data source is
+    missing"), so the bytes have to come from the file.
+    """
+    signature_file(tmp_path, "pie de firma")
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE,
+        images={REAL_CID: "image001.jpg"},
+        save_error="No se pueden guardar los datos adjuntos. Falta el origen de los datos.",
+        signatures_dir=tmp_path,
+    )
+
+    draft_body(adapter, created)
+
+    (image,) = created[0].Attachments.items
+    assert image.props[PROP_ATTACH_CONTENT_ID] == REAL_CID
+    assert image.props[PROP_ATTACH_HIDDEN] is True
+    assert Path(image.path).read_bytes() == PICTURE
+    assert image.path.endswith(".jpg")
+
+
+def test_a_probe_with_no_attachments_at_all_still_gets_its_picture(tmp_path):
+    """The HTML names a cid, but Outlook lists nothing: the file is the only source."""
+    signature_file(tmp_path, "pie de firma")
+    adapter, created, _ = client(signature=IMAGE_ONLY_SIGNATURE, signatures_dir=tmp_path)
+
+    draft_body(adapter, created)
+
+    (image,) = created[0].Attachments.items
+    assert image.props[PROP_ATTACH_CONTENT_ID] == REAL_CID
+    assert Path(image.path).read_bytes() == PICTURE
+
+
+def test_without_a_signature_file_the_draft_is_still_signed_and_created(tmp_path, caplog):
+    """No recoverable picture is a flaw in the signature, never a failed draft."""
+    adapter, created, _ = client(signature=IMAGE_ONLY_SIGNATURE, signatures_dir=tmp_path)
+
+    with caplog.at_level("INFO"):
+        body = draft_body(adapter, created)
+
+    assert created[0].saves == 1
+    assert created[0].Attachments.items == []
+    assert f"cid:{REAL_CID}" in body
+    assert "Could not read the default Outlook signature" not in caplog.text
+
+
+def test_several_signature_files_and_no_default_pick_nothing(tmp_path):
+    """Guessing could sign a report with somebody else's signature."""
+    signature_file(tmp_path, "firma uno")
+    signature_file(tmp_path, "firma dos", payload=b"OTHER")
+    adapter, created, _ = client(signature=IMAGE_ONLY_SIGNATURE, signatures_dir=tmp_path)
+
+    draft_body(adapter, created)
+
+    assert created[0].Attachments.items == []
+
+
+def test_the_default_signature_name_chooses_between_several_files(tmp_path, monkeypatch):
+    signature_file(tmp_path, "firma uno", payload=b"FIRST")
+    signature_file(tmp_path, "firma dos", payload=b"SECOND")
+    monkeypatch.setattr(outlook_module, "_default_signature_name", lambda: "Firma Dos")
+    adapter, created, _ = client(signature=IMAGE_ONLY_SIGNATURE, signatures_dir=tmp_path)
+
+    draft_body(adapter, created)
+
+    (image,) = created[0].Attachments.items
+    assert Path(image.path).read_bytes() == b"SECOND"
+
+
+def test_pictures_are_read_in_document_order_and_tolerate_wrapped_base64(tmp_path):
+    wrapped = base64.encodebytes(b"A" * 200)  # encodebytes inserts newlines
+    (tmp_path / "firma.htm").write_bytes(
+        b'<img src="data:image/png;base64,' + wrapped + b'">'
+        b'<img src="data:image/jpeg;base64,' + base64.b64encode(b"B") + b'">'
+    )
+
+    images = outlook_module._embedded_signature_images(tmp_path, "")
+
+    assert images == [(b"A" * 200, "png"), (b"B", "jpg")]
+
+
+def test_a_signature_file_without_pictures_yields_none(tmp_path):
+    (tmp_path / "firma.htm").write_bytes(b"<html><body><p>solo texto</p></body></html>")
+
+    assert outlook_module._embedded_signature_images(tmp_path, "") == []
+
+
+def test_a_folder_that_does_not_exist_yields_none(tmp_path):
+    assert outlook_module._embedded_signature_images(tmp_path / "nope", "") == []

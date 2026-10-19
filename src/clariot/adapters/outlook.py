@@ -11,7 +11,9 @@ Deployment constraints worth knowing before touching this file:
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 import re
 import tempfile
 from dataclasses import dataclass
@@ -125,6 +127,75 @@ def _merge_signature(html_body: str, signature: str) -> str:
     return signature[:cut] + html_body + signature[cut:]
 
 
+_CID_REFERENCE = re.compile(r"""cid:([^"'\s>)]+)""", re.IGNORECASE)
+
+# A picture stored inside the signature file itself, as a base64 data URI.
+_DATA_URI_IMAGE = re.compile(
+    rb"""<img\b[^>]*?\bsrc=["']data:image/(?P<kind>[A-Za-z0-9.+-]+);base64,(?P<data>[^"']+)["']""",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _default_signature_name() -> str:
+    """Name Outlook keeps for the default new-message signature, or "".
+
+    Read from the registry because the signature files themselves do not say
+    which one is the default.
+    """
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - Windows-only
+        return ""
+    for version in ("16.0", "15.0", "14.0"):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                rf"Software\Microsoft\Office\{version}\Common\MailSettings",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "NewSignature")
+        except OSError:
+            continue
+        if value:
+            return str(value)
+    return ""
+
+
+def _pick_signature_file(folder: Path, preferred: str) -> Path | None:
+    """The signature file to read pictures from, or None when it is ambiguous.
+
+    The default signature wins when its name is known. Without it, a lone file is
+    unambiguous; several files and no way to tell them apart means guessing, and
+    a guess could sign a report with somebody else's signature.
+    """
+    if not folder.is_dir():
+        return None
+    files = sorted(folder.glob("*.htm"))
+    for file in files:
+        if preferred and file.stem.lower() == preferred.lower():
+            return file
+    return files[0] if len(files) == 1 else None
+
+
+def _embedded_signature_images(folder: Path, preferred: str) -> list[tuple[bytes, str]]:
+    """Pictures stored as data URIs inside the signature file, in document order.
+
+    Outlook cannot hand these over as attachments (saving them fails with "the
+    data source is missing"), but the bytes are right there in the file.
+    """
+    file = _pick_signature_file(folder, preferred)
+    if file is None:
+        return []
+    images: list[tuple[bytes, str]] = []
+    for match in _DATA_URI_IMAGE.finditer(file.read_bytes()):
+        try:
+            data = base64.b64decode(re.sub(rb"\s+", b"", match.group("data")))
+        except ValueError:
+            continue
+        kind = match.group("kind").decode("ascii").lower().replace("jpeg", "jpg")
+        images.append((data, kind))
+    return images
+
+
 def _safe_property(item, prop: str) -> str:
     try:
         return str(item.PropertyAccessor.GetProperty(prop) or "")
@@ -142,6 +213,9 @@ class OutlookClient:
     # Class-level default so an instance built without __init__ (as the tests do,
     # since __init__ dispatches COM) still has no images to attach.
     _signature_images: tuple[tuple[Path, str], ...] = ()
+    # Where Outlook keeps signature files. None means the current user's folder;
+    # the tests point it at a temporary directory.
+    _signatures_dir: Path | None = None
 
     def __init__(self, *, use_signature: bool = True) -> None:
         try:
@@ -367,45 +441,87 @@ class OutlookClient:
             return self._signature_cache
 
         signature = ""
-        images: list[tuple[Path, str]] = []
+        probe = None
         try:
             probe = self._app.CreateItem(OL_MAIL_ITEM)
             probe.GetInspector  # noqa: B018 - the access itself is the effect
             signature = str(probe.HTMLBody or "")
-            images = self._save_signature_images(probe, signature)
         except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
             logger.info("Could not read the default Outlook signature: %s", exc)
 
-        if not signature.strip():
+        images: list[tuple[Path, str]] = []
+        if signature.strip() and probe is not None:
+            # Apart from the read above, so a picture that cannot be collected is
+            # reported as that and never as a signature that could not be read.
+            try:
+                images = self._save_signature_images(probe, signature)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not collect the signature's pictures: %s", exc)
+        else:
             logger.debug("No default Outlook signature to add to the draft")
+
         self._signature_cache = signature
         self._signature_images = tuple(images)
         return signature
 
-    @staticmethod
-    def _save_signature_images(probe, signature: str) -> list[tuple[Path, str]]:
-        """Save the inline images the signature references, with their Content-ID.
+    def _save_signature_images(self, probe, signature: str) -> list[tuple[Path, str]]:
+        """Save the pictures the signature references, with their Content-ID.
 
-        Only attachments the HTML actually points at are kept. The folder is a
-        fixed one under the system temp directory, so a run overwrites the files
-        of the previous one instead of piling up new ones.
+        The Content-IDs come from the HTML itself, since that is what a draft has
+        to be able to resolve. The bytes come from Outlook's own attachments when
+        it can hand them over, and from the picture embedded in the signature file
+        when it cannot: some signatures keep their logo as a data URI, and Outlook
+        refuses to save those ("the data source is missing").
+
+        The folder is a fixed one under the system temp directory, so a run
+        overwrites the files of the previous one instead of piling up new ones.
         """
+        cids = list(dict.fromkeys(_CID_REFERENCE.findall(signature)))
+        if not cids:
+            return []
+
         folder = Path(tempfile.gettempdir()) / "clariot-signature"
         folder.mkdir(parents=True, exist_ok=True)
 
-        images: list[tuple[Path, str]] = []
-        for index in range(1, int(probe.Attachments.Count) + 1):
-            attachment = probe.Attachments.Item(index)
+        saved: dict[str, Path] = {}
+        try:
+            count = int(probe.Attachments.Count)
+        except Exception:  # noqa: BLE001
+            count = 0
+        for index in range(1, count + 1):
             try:
+                attachment = probe.Attachments.Item(index)
                 cid = str(attachment.PropertyAccessor.GetProperty(PROP_ATTACH_CONTENT_ID) or "")
-            except Exception:  # noqa: BLE001 - not an inline image
+                if cid not in cids:
+                    continue
+                path = folder / sanitize_filename(
+                    str(attachment.FileName), fallback=f"firma-{index}"
+                )
+                attachment.SaveAsFile(str(path))
+            except Exception as exc:  # noqa: BLE001 - not inline, or unsaveable
+                logger.debug("Outlook would not hand over a signature picture: %s", exc)
                 continue
-            if not cid or f"cid:{cid}" not in signature:
-                continue
-            path = folder / sanitize_filename(str(attachment.FileName), fallback=f"firma-{index}")
-            attachment.SaveAsFile(str(path))
-            images.append((path, cid))
-        return images
+            saved[cid] = path
+
+        missing = [cid for cid in cids if cid not in saved]
+        if missing:
+            signatures = self._signatures_dir or (
+                Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Signatures"
+            )
+            embedded = _embedded_signature_images(signatures, _default_signature_name())
+            if not embedded:
+                logger.info(
+                    "The signature has %s picture(s) that could not be recovered",
+                    len(missing),
+                )
+            # Matched by order of appearance: the k-th picture the HTML references
+            # is the k-th one stored in the file.
+            for number, (cid, (data, kind)) in enumerate(zip(missing, embedded), start=1):
+                path = folder / f"firma-{number}.{kind}"
+                path.write_bytes(data)
+                saved[cid] = path
+
+        return [(path, cid) for cid, path in saved.items()]
 
     def _attach_signature_images(self, mail) -> None:
         """Give a draft the hidden images its signature points at.
