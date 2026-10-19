@@ -69,14 +69,17 @@ class FakeAttachment:
 
     def Delete(self) -> None:
         self._owner.items.remove(self)
+        self._owner.ops.append("delete")
 
 
 class FakeAttachments:
     """Just enough of the Attachments collection for the writing paths."""
 
-    def __init__(self, add_error: str = "") -> None:
+    def __init__(self, add_error: str = "", ops: list[str] | None = None) -> None:
         self.items: list[FakeAttachment] = []
         self._add_error = add_error
+        # What was done to the item this collection belongs to, in order.
+        self.ops: list[str] = ops if ops is not None else []
 
     @property
     def paths(self) -> list[str]:
@@ -89,6 +92,7 @@ class FakeAttachments:
     def Add(self, path: str) -> FakeAttachment:
         if self._add_error:
             raise RuntimeError(self._add_error)
+        self.ops.append("attach")
         attachment = FakeAttachment(self, path=path)
         self.items.append(attachment)
         return attachment
@@ -118,12 +122,22 @@ class FakeMail:
         self._log = log
         self._account = None
         self.Subject = ""
-        self.HTMLBody = ""
+        self._html = ""
+        self.ops: list[str] = []
         self.To = ""
         self.CC = ""
         self.Sent = False
-        self.Attachments = FakeAttachments(add_error)
+        self.Attachments = FakeAttachments(add_error, self.ops)
         self.saves = 0
+
+    @property
+    def HTMLBody(self) -> str:
+        return self._html
+
+    @HTMLBody.setter
+    def HTMLBody(self, value: str) -> None:
+        self._html = value
+        self.ops.append("body")
 
     @property
     def GetInspector(self):
@@ -562,3 +576,38 @@ def test_a_signature_file_without_pictures_yields_none(tmp_path):
 
 def test_a_folder_that_does_not_exist_yields_none(tmp_path):
     assert outlook_module._embedded_signature_images(tmp_path / "nope", "") == []
+
+
+# --- order of operations ----------------------------------------------------
+
+
+def test_the_pictures_are_attached_before_the_body_is_written():
+    """Outlook links a cid: reference to an attachment that already exists.
+
+    With the body written first, the picture showed up as a plain file in the
+    attachment list instead of inside the body as the signature.
+    """
+    adapter, created, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE, images={REAL_CID: "image001.jpg"}
+    )
+
+    draft_body(adapter, created)
+
+    ops = created[0].ops
+    assert ops.index("attach") < ops.index("body")
+
+
+def test_growing_a_draft_also_attaches_the_pictures_before_the_body():
+    existing = FakeMail([], IMAGE_ONLY_SIGNATURE, "")
+    existing.Parent = SimpleNamespace(Name="Por enviar")
+    existing.Attachments.Add("C:/old/previous-alarm.pdf")
+    existing.ops.clear()
+    adapter, _, _ = client(
+        signature=IMAGE_ONLY_SIGNATURE,
+        images={REAL_CID: "image001.jpg"},
+        existing_draft=existing,
+    )
+
+    adapter.update_draft("DRAFT-1", subject="dos alarmas", html_body=REPORT)
+
+    assert existing.ops == ["delete", "attach", "body"]

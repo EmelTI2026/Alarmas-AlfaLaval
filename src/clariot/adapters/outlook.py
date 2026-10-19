@@ -575,8 +575,12 @@ class OutlookClient:
             else:
                 logger.warning("Account '%s' not found; using the default one", sender_account)
 
-        mail.HTMLBody = _merge_signature(html_body, self._signature())
+        # The signature's pictures go on first and the body is written after them:
+        # Outlook only links a cid: reference to an attachment that already exists
+        # when the HTML arrives, otherwise the picture lands as a plain file.
+        signature = self._signature()
         self._attach_signature_images(mail)
+        mail.HTMLBody = _merge_signature(html_body, signature)
 
         for path in attachments:
             if path.exists():
@@ -661,16 +665,18 @@ class OutlookClient:
         """
         item = self._item(entry_id)
         item.Subject = subject
-        # Merged again, not carried over: the body is rewritten wholesale, so a
-        # draft growing a second alarm would otherwise lose its signature.
-        item.HTMLBody = _merge_signature(html_body, self._signature())
         if cc:
             item.CC = "; ".join(cc)
 
         for index in range(item.Attachments.Count, 0, -1):
             item.Attachments.Item(index).Delete()
-        # The loop above also removed the signature's hidden images.
+        # The loop above also removed the signature's hidden images, so they go
+        # back on before the body is written (see create_draft). The body is
+        # merged again, not carried over: it is rewritten wholesale, so a draft
+        # growing a second alarm would otherwise lose its signature.
+        signature = self._signature()
         self._attach_signature_images(item)
+        item.HTMLBody = _merge_signature(html_body, signature)
         for path in attachments:
             if path.exists():
                 item.Attachments.Add(str(path.resolve()))
