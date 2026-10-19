@@ -1,19 +1,43 @@
-# OPTIONAL. Leave it empty and every draft is created without a recipient, which
-# is the normal flow: the technician adds the address and the contact name from
-# memory before sending. Outlook will not send a message with an empty To field,
-# so an unfinished draft can never go out by accident.
+# Recipients per client. Matching is case- and accent-insensitive against the
+# COMPANY / PLANT field extracted from the PDF, and longer patterns win.
 #
-# Fill an entry in only when a client's address is always the same and you want
-# it pre-loaded. Matching is case- and accent-insensitive against the COMPANY /
-# PLANT field extracted from the PDF, and longer patterns win.
+# A client listed here gets its draft created with `to` already filled, so the
+# technician only reviews it. A company that matches nothing here still gets a
+# draft with an empty To field, as before.
 #
-#   clients:
-#     - match: ["cliente-a"]
-#       display_name: "Cliente A"
-#       to: ["operaciones@cliente-a.example"]
-#       cc: []
+# Addresses in `to` are pre-loaded, not sent: the program only ever creates
+# drafts. The shared copies live in `always_cc` below; a client's own `cc` is
+# added on top of them.
 
-clients: []
+clients:
+  - match: ["prolesur"]
+    display_name: "Prolesur"
+    to: ["guillermo.lorcat@soprole.cl"]
+    cc: []
+
+  - match: ["vital jugos"]
+    display_name: "Vital Jugos"
+    to:
+      - "rletelier@koandina.com"
+      - "mvalenzuelal@koandina.com"
+    cc: []
+
+  - match: ["soprole"]
+    display_name: "Soprole"
+    to:
+      - "hernan.vergara@soprole.cl"
+      - "luis.olea@soprole.cl"
+    # Only on Soprole drafts, on top of always_cc.
+    cc: ["cvarela@emeltec.cl"]
+
+  - match: ["surlat"]
+    display_name: "Surlat"
+    to:
+      - "fmatamala@quillayessurlat.cl"
+      - "hcortes@quillayessurlat.cl"
+      - "jtorres@quillayessurlat.cl"
+      - "edonoso@quillayessurlat.cl"
+    cc: []
 
 # Always copied when the report urgency matches settings.yaml -> urgency.critical_values
 critical_cc: []
