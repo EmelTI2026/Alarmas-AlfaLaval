@@ -318,6 +318,31 @@ def test_an_unknown_client_still_gets_a_draft(settings, env, glossary):
     assert "[NOMBRE]" in draft.html_body
 
 
+def test_the_greeting_keeps_the_name_placeholder_for_a_known_client(
+    settings, soprole, env, glossary
+):
+    """The greeting goes to the person, so a known company must not replace it."""
+    summary = summarize_equipment([event(datetime(2026, 7, 26))], glossary)
+
+    draft = build_equipment_draft(summary, LEVEL_URGENT, soprole, settings, env)
+
+    assert draft.client_resolved is True
+    assert draft.to == ("mantencion@soprole.example",)
+    assert f"{settings.email.greeting} [NOMBRE]," in draft.html_body
+    assert f"{settings.email.greeting} Soprole," not in draft.html_body
+
+
+def test_the_weekly_greeting_keeps_the_name_placeholder_for_a_known_client(
+    settings, soprole, env, glossary
+):
+    summaries = group_by_equipment([event(datetime(2026, 7, 22))], glossary)
+
+    draft = build_weekly_draft("Soprole", summaries, soprole, settings, env)
+
+    assert f"{settings.email.greeting} [NOMBRE]," in draft.html_body
+    assert f"{settings.email.greeting} Soprole," not in draft.html_body
+
+
 def test_a_broken_subject_template_says_which_field_is_wrong(settings, soprole, env, glossary):
     broken = replace(settings, reports=replace(settings.reports, urgent_subject="{inventado}"))
     summary = summarize_equipment([event(datetime(2026, 7, 26))], glossary)

@@ -144,8 +144,13 @@ def _attachments(
     return tuple(paths)
 
 
-def _client_name(route: ClientRoute | None, settings: Settings) -> str:
-    return route.display_name if route else settings.email.greeting_placeholder
+def _client_name(settings: Settings) -> str:
+    """The greeting names the person who receives the mail, not the company.
+
+    The technician knows the contact and types it in, so the placeholder stays
+    even when the client is known and its recipients are pre-loaded.
+    """
+    return settings.email.greeting_placeholder
 
 
 def _format_subject(template: str, **values) -> str:
@@ -264,7 +269,7 @@ def build_equipment_draft(
     )
     html = env.get_template(URGENCY_TEMPLATE).render(
         greeting=settings.email.greeting,
-        client_name=_client_name(route, settings),
+        client_name=_client_name(settings),
         summary=summary,
         critical=critical,
         urgent=urgent,
@@ -350,7 +355,7 @@ def build_weekly_draft(
     )
     html = env.get_template(WEEKLY_TEMPLATE).render(
         greeting=settings.email.greeting,
-        client_name=_client_name(route, settings),
+        client_name=_client_name(settings),
         period=spanish_period(start, end),
         total_events=len(events),
         summaries=summaries,
