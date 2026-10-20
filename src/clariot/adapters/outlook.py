@@ -507,6 +507,31 @@ class OutlookClient:
 
     # ----------------------------------------------------------------- writing
 
+    @staticmethod
+    def _resolve_recipients(mail) -> None:
+        """Ask Outlook to recognise the recipients written on a draft.
+
+        Assigning ``To`` and ``CC`` as text leaves every entry unresolved: no
+        address behind it, shown in red, and the message cannot be sent until a
+        person picks each one by hand. ``ResolveAll`` makes Outlook look them up,
+        as it does when somebody types them in. An address it cannot resolve is
+        reported, never fatal: the draft is the job.
+        """
+        try:
+            if mail.Recipients.ResolveAll():
+                return
+            unresolved = [
+                str(recipient.Name)
+                for recipient in (
+                    mail.Recipients.Item(index)
+                    for index in range(1, int(mail.Recipients.Count) + 1)
+                )
+                if not recipient.Resolved
+            ]
+            logger.warning("Outlook could not resolve these recipients: %s", ", ".join(unresolved))
+        except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
+            logger.warning("Could not resolve the recipients: %s", exc)
+
     def create_draft(
         self,
         *,
@@ -527,14 +552,14 @@ class OutlookClient:
         if cc:
             mail.CC = "; ".join(cc)
 
-        # Before the signature is read, on purpose: which signature Outlook
-        # offers depends on the account the message is being sent from.
         if sender_account:
             account = self._account_by_smtp(sender_account)
             if account is not None:
                 mail.SendUsingAccount = account
             else:
                 logger.warning("Account '%s' not found; using the default one", sender_account)
+
+        self._resolve_recipients(mail)
 
         # The signature's pictures go on first and the body is written after them:
         # Outlook only links a cid: reference to an attachment that already exists
@@ -627,7 +652,9 @@ class OutlookClient:
         item = self._item(entry_id)
         item.Subject = subject
         if cc:
+            # Written again as text, which drops the resolution the first write got.
             item.CC = "; ".join(cc)
+            self._resolve_recipients(item)
 
         for index in range(item.Attachments.Count, 0, -1):
             item.Attachments.Item(index).Delete()
