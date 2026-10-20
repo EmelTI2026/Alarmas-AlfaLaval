@@ -417,3 +417,55 @@ def test_the_weekly_report_reports_every_event(settings, soprole, env, glossary)
 def test_an_empty_weekly_report_is_rejected(settings, soprole, env):
     with pytest.raises(ValueError):
         build_weekly_draft("Soprole", [], soprole, settings, env)
+
+
+# --- the closing of the email ------------------------------------------------
+
+
+def _visible(html: str) -> str:
+    import re
+
+    html = re.sub(r"<style.*?</style>", " ", html, flags=re.S)
+    return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+
+
+def test_the_urgency_report_has_no_attachment_note_and_no_team_line(
+    settings, soprole, env, glossary, tmp_path
+):
+    """The PDF travels as an attachment and the signature closes the mail.
+
+    Neither "Se adjunta N reporte original..." nor the "Equipo Emeltec Chile"
+    line belongs in the body any more, even when a PDF is attached.
+    """
+    pdf = tmp_path / "alarma.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    summary = summarize_equipment([event(datetime(2026, 7, 26), pdf=str(pdf))], glossary)
+
+    draft = build_equipment_draft(summary, LEVEL_URGENT, soprole, settings, env)
+
+    assert draft.attachments, "the PDF must still be attached"
+    assert "Se adjunta" not in draft.html_body
+    assert "reporte original" not in draft.html_body
+    assert "Equipo Emeltec Chile" not in draft.html_body
+
+
+def test_the_urgency_report_ends_on_the_farewell(settings, soprole, env, glossary):
+    """Nothing is left after the farewell, so no empty gap precedes the signature."""
+    summary = summarize_equipment([event(datetime(2026, 7, 26))], glossary)
+
+    draft = build_equipment_draft(summary, LEVEL_URGENT, soprole, settings, env)
+
+    assert _visible(draft.html_body).endswith("Saludos cordiales,")
+    assert draft.html_body.rstrip().endswith("</div>")
+
+
+def test_the_weekly_report_has_no_attachment_note_and_no_team_line(
+    settings, soprole, env, glossary
+):
+    summaries = group_by_equipment([event(datetime(2026, 7, 22))], glossary)
+
+    draft = build_weekly_draft("Soprole", summaries, soprole, settings, env)
+
+    assert "Se adjunta" not in draft.html_body
+    assert "Equipo Emeltec Chile" not in draft.html_body
+    assert _visible(draft.html_body).endswith("Saludos cordiales,")

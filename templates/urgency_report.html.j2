@@ -243,22 +243,5 @@
 
   <p style="margin: 0 0 14px 0;">Quedamos atentos a sus comentarios.</p>
 
-  <p style="margin: 0 0 20px 0;">
-    Saludos cordiales,<br>
-    {{ signature_team }}
-  </p>
-
-{% if attachment_count %}
-  <table cellpadding="0" cellspacing="0" border="0" width="{{ width }}"
-         style="border-collapse: collapse; width: {{ width }}px; max-width: 100%; margin: 0;">
-    <tr>
-      <td style="border-top: 1px solid {{ rule }}; padding: 12px 0 0 0;
-                 font-size: 9pt; color: {{ soft }}; line-height: 1.5;">
-        Se adjunta{{ 'n' if attachment_count > 1 else '' }} {{ attachment_count }}
-        reporte{{ 's' if attachment_count > 1 else '' }} original{{ 'es' if attachment_count > 1 else '' }}
-        del sistema de monitoreo.
-      </td>
-    </tr>
-  </table>
-{% endif %}
+  <p style="margin: 0;">Saludos cordiales,</p>
 </div>

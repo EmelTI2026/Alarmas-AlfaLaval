@@ -282,8 +282,6 @@ def build_equipment_draft(
         first_date=spanish_date(start),
         emeltec_note=settings.reports.include_emeltec_note,
         brand=settings.reports.brand_color,
-        signature_team=settings.email.signature_team,
-        attachment_count=len(attachments),
         missing_phrases=[text for _, text in missing_phrases],
     )
 
@@ -363,8 +361,6 @@ def build_weekly_draft(
         single=single,
         emeltec_note=settings.reports.include_emeltec_note,
         brand=settings.reports.brand_color,
-        signature_team=settings.email.signature_team,
-        attachment_count=len(attachments),
     )
 
     return ReportDraft(
