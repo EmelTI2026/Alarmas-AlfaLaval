@@ -30,21 +30,23 @@ set CODIGO=%ERRORLEVEL%
 echo --------------------------------------------------
 echo.
 if "%CODIGO%"=="0" (
-    echo   LISTO. Abri el borrador en Outlook:
+    echo   LISTO. Abre el borrador en Outlook:
     echo.
     echo     Borradores / Urgencias   o   Por enviar
     echo.
     echo   Revisa que:
     echo     - el PDF original este adjunto
     echo     - el informe en espanol se lea bien
-    echo     - el destinatario este VACIO
+    echo     - el destinatario: cargado si el cliente esta
+    echo       en clients.yaml, vacio si no
     echo     - aparezcan [NOMBRE] y [COMPLETAR]
+    echo     - al final este la firma de Outlook
     echo.
     echo   Si esta todo bien, usa "Procesar alertas"
     echo   para el resto.
 ) else (
     echo   TERMINO CON PROBLEMAS.
-    echo   Mira el detalle arriba, o abri logs\clariot.log
+    echo   Mira el detalle arriba, o abre logs\clariot.log
 )
 echo.
 echo ==================================================

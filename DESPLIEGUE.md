@@ -280,11 +280,11 @@ python -m clariot --self-check
 - [ ] Tiene que terminar diciendo **`Todo listo`**:
 
 ```
-Destinatarios precargados: 0 (0 es lo normal)
+Destinatarios precargados: 4 cliente(s) en clients.yaml
 Outlook               : conectado
 Carpeta 'Clariot': OK (0 correo(s) por revisar)
 PDF adjunto           : sin traducir (translation.provider: none)
-Frases (gemini)       : modelo gemini-flash-latest, cuota gratuita de AI Studio
+Frases (gemini)       : modelo gemini-flash-lite-latest, cuota gratuita de AI Studio
 
 Todo listo.
 ```
@@ -332,8 +332,11 @@ La primera línea deja una alerta de prueba en `Clariot`; la segunda la procesa.
 - [ ] Abrir el borrador en `Borradores\Por enviar` y revisar:
   - [ ] El PDF original está adjunto
   - [ ] El informe en español se lee bien
-  - [ ] El destinatario está **vacío**
+  - [ ] El destinatario es el esperado: cargado si el cliente está en
+        `config/clients.yaml` (Prolesur, Vital Jugos, Soprole, Surlat), **vacío** si no
+  - [ ] Las copias internas de Emeltec están en CC
   - [ ] Aparecen `[NOMBRE]` y `[COMPLETAR]`
+  - [ ] Al final está la firma de Outlook (ver la sección 5.3 del README si falta)
 - [ ] Anotar las frases que salgan marcadas `[EN]`: hay que agregarlas al glosario.
 - [ ] **Borrar el mensaje de prueba** de `Procesados` y el borrador de prueba, si se
       usó `--simulate`.
@@ -356,7 +359,7 @@ Explicarle estos seis puntos, en este orden:
 - [ ] Doble clic en el acceso directo. Espera. Aprieta una tecla para cerrar.
 - [ ] Revisa **`Urgencias`** primero: eso se manda hoy.
 - [ ] Después **`Por enviar`**, que es rutina.
-- [ ] En cada borrador: pone el destinatario, reemplaza `[NOMBRE]`, completa la
+- [ ] En cada borrador: revisa el destinatario (agrégalo si viene vacío), reemplaza `[NOMBRE]`, completa la
       recomendación donde dice `[COMPLETAR]`, lee y envía.
 - [ ] Si ve texto marcado `[EN]`, lo traduce y **avisa para agregarlo al glosario**,
       así no vuelve a aparecer nunca más.

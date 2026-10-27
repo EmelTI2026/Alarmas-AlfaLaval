@@ -102,9 +102,9 @@ def self_check(settings, directory: ClientDirectory, config_dir: Path) -> int:
 
     problems: list[str] = []
 
-    # An empty clients.yaml is the normal setup: the technician adds the
-    # recipient when reviewing the draft.
-    print(f"Destinatarios precargados: {len(directory)} (0 es lo normal)")
+    # Clients listed in clients.yaml get the To field pre-filled; any other
+    # company still gets a draft, with an empty To for the technician to fill.
+    print(f"Destinatarios precargados: {len(directory)} cliente(s) en clients.yaml")
 
     try:
         outlook = OutlookClient()
@@ -186,7 +186,7 @@ def setup_folders(settings) -> int:
             return 1
 
     print("\nCarpetas listas. Falta crear la regla de Outlook que mueve")
-    print("los correos de Clariot a la carpeta de origen (ver INSTALACION.md).")
+    print("los correos de Clariot a la carpeta de origen (ver README.md, seccion 5.2).")
     return 0
 
 
